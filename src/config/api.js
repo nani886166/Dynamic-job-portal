@@ -1,8 +1,9 @@
 import axios from "axios";
 
 const api = axios.create({
-  // Deployed Django API: https://job-portal-production-60c4.up.railway.app/api
-  baseURL: import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000/api",
+  baseURL:
+    import.meta.env.VITE_API_BASE_URL ||
+    "https://job-portal-production-1bb1.up.railway.app/api",
 });
 
 api.interceptors.request.use((config) => {
