@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://dynamic-job-portal.vercel.app/sitemap.xml
