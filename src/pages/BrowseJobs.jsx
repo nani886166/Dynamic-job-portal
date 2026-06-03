@@ -16,15 +16,7 @@ import {
   extractList,
   getErrorMessage,
   getJobId,
-  hasId,
 } from "../utils/backendAdapters";
-
-import {
-  fetchAdzunaJobs,
-  isExternalJob,
-  isInternalJob,
-  normalizeInternalJob,
-} from "../utils/jobSources";
 
 import {
   MapPin,
@@ -44,6 +36,168 @@ import {
   Trash2,
 } from "lucide-react";
 
+const ADZUNA_APP_ID = import.meta.env.VITE_ADZUNA_APP_ID;
+const ADZUNA_APP_KEY = import.meta.env.VITE_ADZUNA_APP_KEY;
+
+const formatJobType = (jobType) => {
+  if (!jobType) return "Full-time";
+
+  return String(jobType)
+    .replace(/_/g, "-")
+    .split("-")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join("-");
+};
+
+const toArray = (value) => {
+  if (Array.isArray(value)) return value;
+
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
+const isInternalJob = (job) => job?.source === "internal";
+const isExternalJob = (job) => job?.source === "external";
+
+const hasJobInList = (list = [], jobId) => {
+  return list.some((item) => {
+    const itemId =
+      item?.id ||
+      item?._id ||
+      item?.job?.id ||
+      item?.job?._id ||
+      item?.job_id ||
+      item?.jobId ||
+      item;
+
+    return String(itemId) === String(jobId);
+  });
+};
+
+const normalizeInternalJob = (job = {}) => {
+  const skills = toArray(
+    job.skills_required || job.skillsRequired || job.requirements || job.skills
+  );
+
+  const salary =
+    job.salary ||
+    job.salary_range ||
+    job.salaryRange ||
+    (job.salary_min && job.salary_max
+      ? `₹${job.salary_min} - ₹${job.salary_max}`
+      : "");
+
+  return {
+    ...job,
+    id: job.id || job._id,
+    title: job.title || "Untitled Job",
+    company:
+      job.company ||
+      job.company_name ||
+      job.companyName ||
+      job.posted_by?.company_name ||
+      job.postedBy?.companyName ||
+      "Company",
+    location:
+      job.location ||
+      (job.is_remote || job.isRemote ? "Remote" : "Location not specified"),
+    type: formatJobType(job.job_type || job.jobType || job.type),
+    salary,
+    description: job.description || "",
+    skills,
+    requirements: skills,
+    posted_by: job.posted_by || job.postedBy,
+    postedBy: job.postedBy || job.posted_by,
+    is_owner: job.is_owner ?? job.isOwner,
+    isOwner: job.isOwner ?? job.is_owner,
+    source: "internal",
+  };
+};
+
+const normalizeExternalJob = (job = {}) => {
+  const salary =
+    job.salary_min && job.salary_max
+      ? `₹${Math.round(job.salary_min)} - ₹${Math.round(job.salary_max)}`
+      : "";
+
+  return {
+    id: `external-${job.id}`,
+    externalId: job.id,
+    title: job.title || "Untitled Job",
+    company: job.company?.display_name || "Company",
+    location: job.location?.display_name || "Location not specified",
+    type: formatJobType(job.contract_time || job.contract_type || "External"),
+    salary,
+    description: job.description || "",
+    redirect_url: job.redirect_url,
+    source: "external",
+    skills: [],
+    requirements: [],
+    posted: job.created || "Recently",
+  };
+};
+
+const fetchAdzunaJobs = async ({
+  country = "in",
+  page = 1,
+  what = "developer",
+  where = "",
+  resultsPerPage = 20,
+} = {}) => {
+  if (!ADZUNA_APP_ID || !ADZUNA_APP_KEY) {
+    return {
+      jobs: [],
+      configured: false,
+      message:
+        "External jobs API key missing. Add VITE_ADZUNA_APP_ID and VITE_ADZUNA_APP_KEY in Vercel, then redeploy.",
+    };
+  }
+
+  const params = new URLSearchParams({
+    app_id: ADZUNA_APP_ID,
+    app_key: ADZUNA_APP_KEY,
+    what,
+    results_per_page: String(resultsPerPage),
+    "content-type": "application/json",
+  });
+
+  if (where) {
+    params.set("where", where);
+  }
+
+  const url = `https://api.adzuna.com/v1/api/jobs/${country}/search/${page}?${params.toString()}`;
+
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    const errorText = await response.text();
+
+    console.error("Adzuna API Error:", {
+      status: response.status,
+      statusText: response.statusText,
+      errorText,
+    });
+
+    throw new Error(`External jobs API failed with status ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  return {
+    jobs: Array.isArray(data.results)
+      ? data.results.map(normalizeExternalJob)
+      : [],
+    configured: true,
+    message: "",
+  };
+};
+
 const BrowseJobs = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch();
@@ -59,9 +213,16 @@ const BrowseJobs = () => {
   const savedJobs = user?.candidateProfile?.savedJobs || [];
 
   const [activeTab, setActiveTab] = useState("internal");
-  const [allJobs, setAllJobs] = useState([]);
+
+  const [internalJobs, setInternalJobs] = useState([]);
+  const [externalJobs, setExternalJobs] = useState([]);
+
   const [appliedJobIds, setAppliedJobIds] = useState([]);
-  const [isLoading, setIsLoading] = useState(false);
+
+  const [isLoadingInternal, setIsLoadingInternal] = useState(false);
+  const [isLoadingExternal, setIsLoadingExternal] = useState(false);
+
+  const [internalMessage, setInternalMessage] = useState("");
   const [externalMessage, setExternalMessage] = useState("");
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -78,11 +239,19 @@ const BrowseJobs = () => {
 
   const jobsPerPage = 6;
 
-  const jobTypeOptions = ["Full-time", "Part-time", "Contract", "Internship"];
+  const jobTypeOptions = [
+    "Full-time",
+    "Part-time",
+    "Contract",
+    "Internship",
+    "External",
+  ];
+
   const workModeOptions = ["Remote", "On-site"];
 
   const getApplicationJobId = (application) =>
     application?.job?.id ||
+    application?.job?._id ||
     (application?.job && typeof application.job !== "object"
       ? application.job
       : null) ||
@@ -118,91 +287,106 @@ const BrowseJobs = () => {
 
     return (
       appliedJobIds.some((id) => String(id) === String(jobId)) ||
-      hasId(appliedJobs, jobId)
+      hasJobInList(appliedJobs, jobId)
     );
   };
 
   const isJobSaved = (job) => {
     const jobId = getJobId(job);
-    return hasId(savedJobs, jobId);
+    return hasJobInList(savedJobs, jobId);
   };
 
   useEffect(() => {
-    const fetchJobs = async () => {
-      setIsLoading(true);
-      setExternalMessage("");
+    const fetchInternalJobs = async () => {
+      setIsLoadingInternal(true);
+      setInternalMessage("");
 
       try {
-        const requests = [getJobs()];
+        const jobsRes = await getJobs();
 
-        if (isCandidate) {
-          requests.push(api.get("/applications/my/"));
-        }
+        const jobsData = extractList(jobsRes.data, ["jobs", "results"]);
 
-        const [jobsRes, applicationsRes] = await Promise.allSettled(requests);
-
-        if (jobsRes.status !== "fulfilled") {
-          throw jobsRes.reason;
-        }
-
-        const jobsData = extractList(jobsRes.value.data, ["jobs", "results"]);
-
-        const backendJobs = Array.isArray(jobsData)
+        const normalizedJobs = Array.isArray(jobsData)
           ? jobsData.map(normalizeInternalJob)
           : [];
 
-        if (applicationsRes?.status === "fulfilled") {
-          const applications = extractList(applicationsRes.value.data, [
-            "applications",
-            "results",
-          ]);
-
-          setAppliedJobIds(
-            applications
-              .map(getApplicationJobId)
-              .filter(Boolean)
-              .map(String)
-          );
-        } else if (isCandidate) {
-          setAppliedJobIds([]);
-        }
-
-        let externalJobs = [];
-
-        try {
-          const externalRes = await fetchAdzunaJobs({
-            country: "in",
-            what: "developer",
-            resultsPerPage: 20,
-          });
-
-          externalJobs = externalRes.jobs || [];
-
-          setExternalMessage(
-            externalRes.configured ? "" : externalRes.message
-          );
-        } catch (externalError) {
-          console.error("Adzuna Fetch Error:", externalError);
-
-          setExternalMessage(
-            externalError.message ||
-              "External jobs are not available right now."
-          );
-        }
-
-        setAllJobs([...backendJobs, ...externalJobs]);
+        setInternalJobs(normalizedJobs);
       } catch (error) {
-        console.error("Jobs Fetch Error:", error);
+        console.error("Internal Jobs Fetch Error:", error);
 
-        toast.error(getErrorMessage(error, "Failed to fetch jobs"));
-        setAllJobs([]);
+        setInternalJobs([]);
+        setInternalMessage(
+          getErrorMessage(error, "Internal jobs are not available right now.")
+        );
       } finally {
-        setIsLoading(false);
+        setIsLoadingInternal(false);
       }
     };
 
-    fetchJobs();
+    fetchInternalJobs();
+  }, []);
+
+  useEffect(() => {
+    const fetchApplications = async () => {
+      if (!isCandidate) {
+        setAppliedJobIds([]);
+        return;
+      }
+
+      try {
+        const applicationsRes = await api.get("/applications/my/");
+
+        const applications = extractList(applicationsRes.data, [
+          "applications",
+          "results",
+        ]);
+
+        setAppliedJobIds(
+          applications
+            .map(getApplicationJobId)
+            .filter(Boolean)
+            .map(String)
+        );
+      } catch (error) {
+        console.error("Applications Fetch Error:", error);
+        setAppliedJobIds([]);
+      }
+    };
+
+    fetchApplications();
   }, [isCandidate]);
+
+  useEffect(() => {
+    const fetchExternalJobs = async () => {
+      setIsLoadingExternal(true);
+      setExternalMessage("");
+
+      try {
+        const externalRes = await fetchAdzunaJobs({
+          country: "in",
+          what: "developer",
+          resultsPerPage: 20,
+        });
+
+        setExternalJobs(externalRes.jobs || []);
+
+        setExternalMessage(
+          externalRes.configured ? "" : externalRes.message
+        );
+      } catch (error) {
+        console.error("Adzuna Fetch Error:", error);
+
+        setExternalJobs([]);
+        setExternalMessage(
+          error.message || "External jobs are not available right now."
+        );
+      } finally {
+        setIsLoadingExternal(false);
+      }
+    };
+
+    fetchExternalJobs();
+  }, []);
 
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -226,6 +410,12 @@ const BrowseJobs = () => {
 
     return () => clearTimeout(timer);
   }, [searchQuery]);
+
+  const handleTabChange = (tab) => {
+    setActiveTab(tab);
+    setCurrentPage(1);
+    setOpenMenuId(null);
+  };
 
   const handleTypeChange = (type) => {
     setSelectedTypes((prev) =>
@@ -380,7 +570,7 @@ const BrowseJobs = () => {
     try {
       await deleteJob(jobId);
 
-      setAllJobs((prev) =>
+      setInternalJobs((prev) =>
         prev.filter((item) => String(getJobId(item)) !== String(jobId))
       );
 
@@ -390,15 +580,20 @@ const BrowseJobs = () => {
     }
   };
 
-  const filteredJobs = allJobs.filter((job) => {
-    const internal = isInternalJob(job);
-    const matchesTab = activeTab === "internal" ? internal : !internal;
+  const activeJobs = activeTab === "internal" ? internalJobs : externalJobs;
+  const isLoading =
+    activeTab === "internal" ? isLoadingInternal : isLoadingExternal;
 
+  const activeMessage =
+    activeTab === "internal" ? internalMessage : externalMessage;
+
+  const filteredJobs = activeJobs.filter((job) => {
     const searchTarget = `
       ${job.title || ""}
       ${job.company || ""}
       ${job.location || ""}
       ${(job.skills || []).join(" ")}
+      ${job.description || ""}
     `.toLowerCase();
 
     const matchesSearch = searchTarget.includes(
@@ -413,19 +608,24 @@ const BrowseJobs = () => {
           .includes(type.toLowerCase())
       );
 
-    const isRemote = String(job.location || "")
-      .toLowerCase()
-      .includes("remote");
+    const location = String(job.location || "").toLowerCase();
+    const type = String(job.type || "").toLowerCase();
+
+    const isRemote =
+      location.includes("remote") ||
+      type.includes("remote") ||
+      job.is_remote === true ||
+      job.isRemote === true;
 
     const matchesMode =
       selectedModes.length === 0 ||
       (selectedModes.includes("Remote") && isRemote) ||
       (selectedModes.includes("On-site") && !isRemote);
 
-    return matchesTab && matchesSearch && matchesType && matchesMode;
+    return matchesSearch && matchesType && matchesMode;
   });
 
-  const totalPages = Math.ceil(filteredJobs.length / jobsPerPage);
+  const totalPages = Math.ceil(filteredJobs.length / jobsPerPage) || 1;
 
   const currentJobs = filteredJobs.slice(
     (currentPage - 1) * jobsPerPage,
@@ -437,7 +637,17 @@ const BrowseJobs = () => {
       <div className="bg-card border-b border-border py-8 px-4">
         <div className="max-w-7xl mx-auto flex flex-col gap-6">
           <div className="flex flex-col md:flex-row justify-between items-center gap-6">
-            <h1 className="text-4xl font-black tracking-tight">Browse Jobs</h1>
+            <div>
+              <h1 className="text-4xl font-black tracking-tight">
+                Browse Jobs
+              </h1>
+
+              <p className="text-sm text-muted-foreground mt-2">
+                {activeTab === "internal"
+                  ? "Showing internal jobs from your platform"
+                  : "Showing external jobs from Adzuna"}
+              </p>
+            </div>
 
             <div className="relative w-full md:max-w-md">
               <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
@@ -462,31 +672,33 @@ const BrowseJobs = () => {
 
               <div className="flex bg-muted p-1 rounded-full border border-border shrink-0">
                 <button
-                  onClick={() => {
-                    setActiveTab("internal");
-                    setCurrentPage(1);
-                  }}
+                  type="button"
+                  onClick={() => handleTabChange("internal")}
                   className={`px-6 py-2 rounded-full text-sm font-bold transition-all ${
                     activeTab === "internal"
-                      ? "bg-background shadow-sm"
-                      : "text-muted-foreground"
+                      ? "bg-background shadow-sm text-foreground"
+                      : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
                   Internal
+                  <span className="ml-2 text-xs opacity-70">
+                    {internalJobs.length}
+                  </span>
                 </button>
 
                 <button
-                  onClick={() => {
-                    setActiveTab("external");
-                    setCurrentPage(1);
-                  }}
+                  type="button"
+                  onClick={() => handleTabChange("external")}
                   className={`px-6 py-2 rounded-full text-sm font-bold transition-all ${
                     activeTab === "external"
-                      ? "bg-background shadow-sm"
-                      : "text-muted-foreground"
+                      ? "bg-background shadow-sm text-foreground"
+                      : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
                   External
+                  <span className="ml-2 text-xs opacity-70">
+                    {externalJobs.length}
+                  </span>
                 </button>
               </div>
             </div>
@@ -583,19 +795,20 @@ const BrowseJobs = () => {
               <Loader2 className="animate-spin w-10 h-10 text-primary" />
 
               <p className="text-muted-foreground font-medium">
-                Fetching jobs...
+                {activeTab === "internal"
+                  ? "Fetching internal jobs..."
+                  : "Fetching external jobs..."}
               </p>
             </div>
           ) : filteredJobs.length === 0 ? (
             <div className="text-center py-20 bg-card rounded-3xl border border-border">
               <h3 className="text-2xl font-bold mb-2">
-                No jobs match your filters
+                No {activeTab} jobs found
               </h3>
 
               <p className="text-muted-foreground mb-6">
-                {activeTab === "external" && externalMessage
-                  ? externalMessage
-                  : "Try removing some checkboxes or adjusting your search query."}
+                {activeMessage ||
+                  "Try removing filters or changing your search."}
               </p>
 
               <button
@@ -609,7 +822,8 @@ const BrowseJobs = () => {
             <>
               <div className="mb-4 flex justify-between items-center">
                 <p className="text-muted-foreground font-medium">
-                  Showing {currentJobs.length} of {filteredJobs.length} jobs
+                  Showing {currentJobs.length} of {filteredJobs.length}{" "}
+                  {activeTab} jobs
                 </p>
               </div>
 
@@ -626,7 +840,9 @@ const BrowseJobs = () => {
                       key={jobId}
                       className="bg-card border border-border rounded-3xl p-6 hover:border-primary/50 transition-all cursor-pointer flex flex-col justify-between"
                       onClick={() =>
-                        external ? openExternalJob(job) : navigateToJobDetails(job)
+                        external
+                          ? openExternalJob(job)
+                          : navigateToJobDetails(job)
                       }
                     >
                       <div>
@@ -648,6 +864,12 @@ const BrowseJobs = () => {
                           </div>
 
                           <div className="flex items-center gap-2 shrink-0">
+                            {external && (
+                              <span className="bg-blue-500/10 text-blue-600 text-[10px] font-bold px-3 py-1 rounded-full">
+                                External
+                              </span>
+                            )}
+
                             {internal && applied && (
                               <span className="bg-green-500/10 text-green-600 text-[10px] font-bold px-3 py-1 rounded-full flex items-center gap-1">
                                 <CheckCircle2 className="w-3 h-3" />
@@ -767,7 +989,7 @@ const BrowseJobs = () => {
                           )}
                         </div>
 
-                        {external && job.description && (
+                        {job.description && (
                           <p className="text-sm text-muted-foreground line-clamp-2 mb-4">
                             {job.description}
                           </p>
