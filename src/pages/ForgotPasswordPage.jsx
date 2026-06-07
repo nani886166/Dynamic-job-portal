@@ -45,12 +45,7 @@ const ForgotPasswordPage = () => {
       setStep(2);
     } catch (error) {
       setIsLoading(false);
-      const status = error.response?.status;
-      toast.error(
-        status === 404
-          ? "Forgot password service is not available yet."
-          : getErrorMessage(error, "Unable to send reset code.")
-      );
+      toast.error(getErrorMessage(error, "Unable to send reset code."));
     }
   };
 
@@ -75,26 +70,14 @@ const ForgotPasswordPage = () => {
     }
   };
 
-  const handleVerifyOtp = async (e) => {
+  const handleVerifyOtp = (e) => {
     e.preventDefault();
     const enteredOtp = otp.join("");
     if (enteredOtp.length < OTP_LENGTH)
       return toast.error("Enter the full 6-digit code");
 
-    setIsLoading(true);
-    try {
-      await api.post("/auth/verify-otp/", {
-        email,
-        otp: enteredOtp,
-      });
-      setVerifiedOtp(enteredOtp);
-      setIsLoading(false);
-      toast.success("Code verified!");
-      setStep(3);
-    } catch (error) {
-      setIsLoading(false);
-      toast.error(getErrorMessage(error, "Invalid or expired verification code."));
-    }
+    setVerifiedOtp(enteredOtp);
+    setStep(3);
   };
 
   // --- STEP 3: Handle Password Reset ---
@@ -123,12 +106,7 @@ const ForgotPasswordPage = () => {
       navigate("/auth/login"); // Send them back to login
     } catch (error) {
       setIsLoading(false);
-      const status = error.response?.status;
-      toast.error(
-        status === 404
-          ? "Forgot password service is not available yet."
-          : getErrorMessage(error, "Unable to reset password.")
-      );
+      toast.error(getErrorMessage(error, "Unable to reset password."));
     }
   };
 

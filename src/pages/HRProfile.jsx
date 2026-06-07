@@ -14,10 +14,13 @@ import {
   DollarSign,
   Eye,
   Pencil,
-  Trash2
+  Trash2,
+  Mail,
+  CheckCircle2,
+  XCircle
 } from "lucide-react";
 import api from "../config/api";
-import { extractList, getJobId as getBackendJobId, normalizeJob, normalizeProfile } from "../utils/backendAdapters";
+import { extractList, getErrorMessage, getJobId as getBackendJobId, normalizeJob, normalizeProfile } from "../utils/backendAdapters";
 import { deleteJob, getMyPostedJobs, updateJob } from "../api/jobs";
 
 const HRProfile = () => {
@@ -27,6 +30,9 @@ const HRProfile = () => {
   const [profile, setProfile] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [jobsError, setJobsError] = useState("");
+  const [applicants, setApplicants] = useState([]);
+  const [applicantsError, setApplicantsError] = useState("");
+  const [replyingId, setReplyingId] = useState(null);
   const [openMenuId, setOpenMenuId] = useState(null);
   const menuRef = useRef(null);
 
@@ -43,6 +49,24 @@ const HRProfile = () => {
     navigate(`/jobs/${jobId}`);
   };
 
+  const totalApplicants = applicants.length;
+
+  const getStatusColor = (status) => {
+    const normalized = String(status || "pending").toLowerCase();
+    if (normalized === "shortlisted" || normalized === "hired") {
+      return "bg-emerald-500/10 text-emerald-700 border-emerald-500/20";
+    }
+    if (normalized === "rejected") {
+      return "bg-destructive/10 text-destructive border-destructive/20";
+    }
+    if (normalized === "reviewed") {
+      return "bg-blue-500/10 text-blue-700 border-blue-500/20";
+    }
+    return "bg-muted text-muted-foreground border-border";
+  };
+
+  const getApplicationId = (application) => application?.id || application?._id;
+
   // --- 1. FETCH DATA ---
   useEffect(() => {
     const fetchHRData = async () => {
@@ -53,10 +77,46 @@ const HRProfile = () => {
         ]);
 
         if (jobsRes.status === "fulfilled") {
-          setJobsList(extractList(jobsRes.value.data, ["jobs", "results"]).map(normalizeJob));
+          const normalizedJobs = extractList(jobsRes.value.data, ["jobs", "results"]).map(normalizeJob);
+          setJobsList(normalizedJobs);
+
+          const applicationResults = await Promise.allSettled(
+            normalizedJobs
+              .filter((job) => getJobId(job))
+              .map(async (job) => {
+                const response = await api.get(`/applications/hr/jobs/${getJobId(job)}/applications/`);
+                return extractList(response.data, ["applications", "results"]).map((application) => ({
+                  ...application,
+                  job_summary: {
+                    id: getJobId(job),
+                    title: application.job_title || job.title,
+                    company: job.company,
+                    location: job.location,
+                  },
+                }));
+              })
+          );
+
+          const loadedApplicants = applicationResults
+            .filter((result) => result.status === "fulfilled")
+            .flatMap((result) => result.value)
+            .sort((left, right) => new Date(right.applied_at || 0) - new Date(left.applied_at || 0));
+
+          setApplicants(loadedApplicants);
+          setJobsList(
+            normalizedJobs.map((job) => ({
+              ...job,
+              applicants: loadedApplicants.filter((application) => String(application.job) === String(getJobId(job))).length || job.applicants || 0,
+            }))
+          );
+
+          if (applicationResults.some((result) => result.status === "rejected")) {
+            setApplicantsError("Some applicant records could not be loaded.");
+          }
         } else {
           setJobsList([]);
           setJobsError("Could not load your posted jobs.");
+          setApplicants([]);
         }
 
         if (profileRes.status === "fulfilled") {
@@ -111,6 +171,40 @@ const HRProfile = () => {
     }
   };
 
+  const handleReplyToApplicant = async (application, nextStatus) => {
+    const applicationId = getApplicationId(application);
+    const applicantName = application.applicant_name || application.applicant_email || "this applicant";
+    const jobTitle = application.job_title || application.job_summary?.title || "this role";
+    const defaultMessage =
+      nextStatus === "shortlisted"
+        ? `Congratulations ${applicantName}, you have been selected for the next round for ${jobTitle}.`
+        : `Thank you ${applicantName} for applying to ${jobTitle}. We are not moving forward with your application at this time.`;
+    const message = window.prompt("Message to send to the candidate:", defaultMessage);
+
+    if (!message || !applicationId) {
+      return;
+    }
+
+    try {
+      setReplyingId(applicationId);
+      await api.post(`/applications/hr/reply/${applicationId}/`, {
+        status: nextStatus,
+        message,
+      });
+      setApplicants((prev) =>
+        prev.map((item) =>
+          getApplicationId(item) === applicationId ? { ...item, status: nextStatus } : item
+        )
+      );
+      window.dispatchEvent(new Event("jobportal:notifications-refresh"));
+      toast.success("Reply sent to candidate");
+    } catch (error) {
+      toast.error(getErrorMessage(error, "Could not send reply"));
+    } finally {
+      setReplyingId(null);
+    }
+  };
+
   return (
     <div className="mt-8 space-y-6">
       <div className="bg-card border border-border rounded-2xl p-6 shadow-sm">
@@ -154,7 +248,7 @@ const HRProfile = () => {
             <Users className="w-6 h-6" />
           </div>
           <div>
-            <p className="text-3xl font-black">0</p>
+            <p className="text-3xl font-black">{totalApplicants}</p>
             <p className="text-sm font-bold text-muted-foreground">Total Applicants</p>
           </div>
         </div>
@@ -382,13 +476,87 @@ const HRProfile = () => {
             </h3>
             
             <div className="space-y-4">
-              <div className="text-center py-8 text-muted-foreground font-medium">
-                Applicant data is not available yet.
-              </div>
+              {isLoading ? (
+                <div className="text-center py-8 text-muted-foreground font-medium">
+                  Loading applicants...
+                </div>
+              ) : applicantsError ? (
+                <div className="rounded-xl border border-destructive/20 bg-destructive/10 p-4 text-sm font-bold text-destructive">
+                  {applicantsError}
+                </div>
+              ) : applicants.length > 0 ? (
+                applicants.slice(0, 6).map((application) => {
+                  const applicationId = getApplicationId(application);
+                  const isReplying = replyingId === applicationId;
+                  const skills = Array.isArray(application.snapshot_skills)
+                    ? application.snapshot_skills
+                    : [];
+
+                  return (
+                    <div key={applicationId} className="rounded-xl border border-border bg-muted/10 p-4 space-y-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="font-black text-foreground truncate">
+                            {application.applicant_name || application.applicant_email || "Candidate"}
+                          </p>
+                          <p className="text-xs text-muted-foreground truncate">
+                            {application.job_title || application.job_summary?.title || "Applied role"}
+                          </p>
+                          {application.applicant_email && (
+                            <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1 truncate">
+                              <Mail className="w-3 h-3 shrink-0" /> {application.applicant_email}
+                            </p>
+                          )}
+                        </div>
+                        <span className={`px-2.5 py-1 rounded-full border text-[10px] font-black uppercase ${getStatusColor(application.status)}`}>
+                          {application.status || "pending"}
+                        </span>
+                      </div>
+
+                      {skills.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {skills.slice(0, 4).map((skill) => (
+                            <span key={`${applicationId}-${skill}`} className="px-2 py-1 rounded-md bg-background border border-border text-[11px] font-bold text-muted-foreground">
+                              {skill}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          disabled={isReplying}
+                          onClick={() => handleReplyToApplicant(application, "shortlisted")}
+                          className="py-2 rounded-lg bg-emerald-600 text-white text-xs font-black flex items-center justify-center gap-1.5 hover:bg-emerald-700 disabled:opacity-60"
+                        >
+                          <CheckCircle2 className="w-4 h-4" /> Select
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isReplying}
+                          onClick={() => handleReplyToApplicant(application, "rejected")}
+                          className="py-2 rounded-lg bg-destructive text-destructive-foreground text-xs font-black flex items-center justify-center gap-1.5 hover:bg-destructive/90 disabled:opacity-60"
+                        >
+                          <XCircle className="w-4 h-4" /> Reject
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="text-center py-8 text-muted-foreground font-medium">
+                  No applicants yet.
+                </div>
+              )}
             </div>
 
-            <button className="w-full mt-6 py-2.5 bg-muted/50 text-sm font-bold text-foreground rounded-xl hover:bg-muted transition-colors border border-border">
-              View All Candidates
+            <button
+              type="button"
+              onClick={() => toast(totalApplicants ? "Showing latest applicants here." : "No applicants yet.")}
+              className="w-full mt-6 py-2.5 bg-muted/50 text-sm font-bold text-foreground rounded-xl hover:bg-muted transition-colors border border-border"
+            >
+              {totalApplicants ? `${totalApplicants} Applicant${totalApplicants === 1 ? "" : "s"}` : "No Candidates"}
             </button>
           </div>
         </div>
